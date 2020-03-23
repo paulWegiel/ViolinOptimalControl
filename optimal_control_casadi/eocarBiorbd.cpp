@@ -1,47 +1,82 @@
 // C++ (and CasADi) from here on
 #include <casadi.hpp>
 
+#include "biorbdCasadi_interface_common.h"
 #include "utils.h"
-#include "forward_dynamics_casadi.h"
+#include "AnimationCallback.h"
+
 #include "biorbd.h"
 extern biorbd::Model m;
 biorbd::Model m("../../models/eocar.bioMod");
 
-const std::string optimizationName("eocarBiorbdCasadi");
+const std::string optimizationName("eocarBiorbd");
 const std::string resultsPath("../../Results/");
 const biorbd::utils::Path controlResultsFileName(resultsPath + "Controls" + optimizationName + ".txt");
 const biorbd::utils::Path stateResultsFileName(resultsPath + "States" + optimizationName + ".txt");
 
 
-int main(){
+int main(int argc, char *argv[]){
     // ---- OPTIONS ---- //
     // Dimensions of the problem
     std::cout << "Preparing the optimal control problem..." << std::endl;
 
-    Visualization visu;
+    Visualization visu(Visualization::LEVEL::GRAPH, argc, argv);
 
     ProblemSize probSize;
     probSize.tf = 2.0;
-    probSize.ns = 30;
+    probSize.ns = 50;
     probSize.dt = probSize.tf/probSize.ns; // length of a control interval
 
-    // Functions names
-    std::string dynamicsFunctionName(libforward_dynamics_casadi_name());
-
     // Chose the ODE solver
-    int odeSolver(ODE_SOLVER::RK);
+    ODE_SOLVER odeSolver(ODE_SOLVER::RK);
 
-    // Chose the objective function
-    void (*objectiveFunction)(
-                const ProblemSize&,
-                const std::vector<casadi::MX>&,
-                const std::vector<casadi::MX>&,
-                casadi::MX&) = minimizeControls;
+    // Chose the objective functions
+    std::vector<std::pair<void (*)(const ProblemSize&,
+                         const std::vector<casadi::MX>&,
+                         const std::vector<casadi::MX>&,
+                         double,
+                         casadi::MX&), double>> objectiveFunctions;
+    objectiveFunctions.push_back(std::make_pair(minimizeTorqueControls, 10));
+    objectiveFunctions.push_back(std::make_pair(minimizeMuscleControls, 10));
+    objectiveFunctions.push_back(std::make_pair(minimizeStates, 1./100));
 
-    // Differential variables
-    casadi::MX u;
-    casadi::MX x;
-    defineDifferentialVariables(probSize, u, x);
+    // Bounds and initial guess for the state
+    std::vector<biorbd::utils::Range> ranges;
+    for (unsigned int i=0; i<m.nbSegment(); ++i){
+        std::vector<biorbd::utils::Range> segRanges(m.segment(i).ranges());
+        for(unsigned int j=0; j<segRanges.size(); ++j){
+            ranges.push_back(segRanges[j]);
+        }
+    }
+    BoundaryConditions xBounds;
+    InitialConditions xInit;
+    for (unsigned int i=0; i<m.nbQ(); ++i) {
+        xBounds.starting_min.push_back(ranges[i].min());
+        xBounds.min.push_back(ranges[i].min());
+        xBounds.end_min.push_back(ranges[i].min());
+
+        xBounds.starting_max.push_back(ranges[i].max());
+        xBounds.max.push_back(ranges[i].max());
+        xBounds.end_max.push_back(ranges[i].max());
+
+        if (i == 0){
+            xInit.val.push_back(1.5);
+        } else {
+            xInit.val.push_back(0);
+        }
+    };
+    double velLim(15);
+    for (unsigned int i=0; i<m.nbQdot(); ++i) {
+        xBounds.starting_min.push_back(-velLim);
+        xBounds.min.push_back(-velLim);
+        xBounds.end_min.push_back(-velLim);
+
+        xBounds.starting_max.push_back(velLim);
+        xBounds.max.push_back(velLim);
+        xBounds.end_max.push_back(velLim);
+
+        xInit.val.push_back(0);
+    };
 
     // Bounds and initial guess for the control
     BoundaryConditions uBounds;
@@ -57,125 +92,67 @@ int main(){
         uInit.val.push_back(0);
     };
 
-    // Bounds and initial guess for the state
-    BoundaryConditions xBounds;
-    InitialConditions xInit;
-    for (unsigned int i=0; i<m.nbQ(); ++i) {
-        xBounds.min.push_back(-100);
-        xBounds.starting_min.push_back(0);
-        if (i == 0) xBounds.end_min.push_back(10);
-        else if (i == 1) xBounds.end_min.push_back(0);
-        else if (i == 2) xBounds.end_min.push_back(0);
-        else if (i == 3) xBounds.end_min.push_back(M_PI/4);
-        else if (i == 4) xBounds.end_min.push_back(M_PI/6);
-        else if (i == 5) xBounds.end_min.push_back(M_PI/8);
+    // If the movement is cyclic
+    bool useCyclicObjective = false;
+    bool useCyclicConstraint = false;
 
-        xBounds.max.push_back(100);
-        xBounds.starting_max.push_back(0);
-        if (i == 0) xBounds.end_max.push_back(10);
-        else if (i == 1) xBounds.end_max.push_back(0);
-        else if (i == 2) xBounds.end_max.push_back(0);
-        else if (i == 3) xBounds.end_max.push_back(M_PI/4);
-        else if (i == 4) xBounds.end_max.push_back(M_PI/6);
-        else if (i == 5) xBounds.end_max.push_back(M_PI/8);
+    // Start at the starting point and finish at the ending point
+    std::vector<IndexPairing> markersToPair;
+    markersToPair.push_back(IndexPairing(Instant::START, {0, 1}));
+    markersToPair.push_back(IndexPairing(Instant::MID, {0, 2}));
+    markersToPair.push_back(IndexPairing(Instant::END, {0, 1}));
 
-        xInit.val.push_back(0);
-    };
-    for (unsigned int i=0; i<m.nbQdot(); ++i) {
-        xBounds.min.push_back(-100);
-        xBounds.starting_min.push_back(0);
-        xBounds.end_min.push_back(0);
+    // Always point towards the point(3)
+    std::vector<IndexPairing> markerToProject;
+//    markerToProject.push_back(IndexPairing (Instant::ALL, {0, 3, PLANE::XZ}));
 
-        xBounds.max.push_back(100);
-        xBounds.starting_max.push_back(0);
-        xBounds.end_max.push_back(0);
+    // Always point upward
+    std::vector<IndexPairing> axesToAlign;
+//    axesToAlign.push_back(IndexPairing(Instant::MID, {0, AXIS::X, 1, AXIS::MINUS_Y}));
 
-        xInit.val.push_back(0);
-    };
+    // Always point in line with a given vector described by markers
+    std::vector<IndexPairing> alignWithMarkers;
+//    alignWithMarkers.push_back(IndexPairing(Instant::MID, {0, AXIS::X, 2, 3}));
+
+    // Always have the segment aligned with a certain system of axes
+    std::vector<IndexPairing> alignWithMarkersReferenceFrame;
+//    alignWithMarkersReferenceFrame.push_back(IndexPairing(Instant::ALL,
+//            {0, AXIS::X, 1, 2, AXIS::Y, 1, 3, AXIS::X}));
+
+    // Always point toward a specific IMU
+    std::vector<IndexPairing> alignWithCustomRT;
+    alignWithCustomRT.push_back(IndexPairing(Instant::ALL,{0, 0}));
 
 
 
     // From here, unless one wants to fundamentally change the problem,
     // they should not change anything
-
-    // ODE right hand side
-    casadi::Dict opts_dyn;
-    opts_dyn["enable_fd"] = true; // This is for now, someday, it will provide the dynamic derivative!
-    casadi::Function f = casadi::external(dynamicsFunctionName, opts_dyn);
-    casadi::MXDict ode = {
-        {"x", x},
-        {"p", u},
-        {"ode", f(std::vector<casadi::MX>({x, u}))[0]}
-    };
-    casadi::Dict ode_opt;
-    ode_opt["t0"] = 0;
-    ode_opt["tf"] = probSize.dt;
-    if (odeSolver == ODE_SOLVER::RK || odeSolver == ODE_SOLVER::COLLOCATION)
-        ode_opt["number_of_finite_elements"] = 5;
-    casadi::Function F;
-    if (odeSolver == ODE_SOLVER::RK)
-        F = casadi::integrator("integrator", "rk", ode, ode_opt);
-    else if (odeSolver == ODE_SOLVER::COLLOCATION)
-        F = casadi::integrator("integrator", "collocation", ode, ode_opt);
-    else if (odeSolver == ODE_SOLVER::CVODES)
-        F = casadi::integrator("integrator", "cvodes", ode, ode_opt);
-    else
-        throw std::runtime_error("ODE solver not implemented..");
-
-    // Prepare the NLP problem
     casadi::MX V;
     BoundaryConditions vBounds;
     InitialConditions vInit;
-    std::vector<casadi::MX> U;
-    std::vector<casadi::MX> X;
-    defineMultipleShootingNodes(probSize, uBounds, xBounds, uInit, xInit,
-                                V, vBounds, vInit, U, X);
-
-    // Continuity constraints
     std::vector<casadi::MX> g;
-    continuityConstraints(F, probSize, U, X, g);
-
-    // Objective function
+    BoundaryConditions gBounds;
     casadi::MX J;
-    objectiveFunction(probSize, X, U, J);
+    casadi::Function dynamics;
+    prepareMusculoSkeletalNLP(probSize, odeSolver, uBounds, uInit, xBounds, xInit,
+                              markersToPair, markerToProject, axesToAlign,
+                              alignWithMarkers, alignWithMarkersReferenceFrame, alignWithCustomRT,
+                              useCyclicObjective, useCyclicConstraint, objectiveFunctions,
+                              V, vBounds, vInit, g, gBounds, J, dynamics);
 
     // Optimize
-    std::cout << "Solving the optimal control problem..." << std::endl;
-    std::vector<double> V_opt;
+    AnimationCallback animCallback(visu, V, g, probSize, 10, dynamics);
     clock_t start = clock();
-    solveProblemWithIpopt(V, vBounds, vInit, J, g, probSize, V_opt, visu);
+    std::vector<double> V_opt = solveProblemWithIpopt(V, vBounds, vInit, J, g, gBounds, probSize, animCallback);
     clock_t end=clock();
-    std::cout << "Done!" << std::endl;
 
     // Get the optimal state trajectory
-    std::vector<biorbd::utils::Vector> Q;
-    std::vector<biorbd::utils::Vector> Qdot;
-    std::vector<biorbd::utils::Vector> Tau;
-    extractSolution(V_opt, probSize, Q, Qdot, Tau);
-
-    // Show the solution
-    std::cout << "Results:" << std::endl;
-    for (unsigned int q=0; q<m.nbQ(); ++q){
-        std::cout << "Q[" << q <<"] = " << Q[q].transpose() << std::endl;
-        std::cout << "Qdot[" << q <<"] = " << Qdot[q].transpose() << std::endl;
-        std::cout << "Tau[" << q <<"] = " << Tau[q].transpose() << std::endl;
-        std::cout << std::endl;
-    }
-    createTreePath(resultsPath);
-    writeCasadiResults(controlResultsFileName, Tau, probSize.dt);
-    std::vector<biorbd::utils::Vector> QandQdot;
-    for (auto q : Q){
-        QandQdot.push_back(q);
-    }
-    for (auto qdot : Qdot){
-        QandQdot.push_back(qdot);
-    }
-    writeCasadiResults(controlResultsFileName, Tau, probSize.dt);
-    writeCasadiResults(stateResultsFileName, QandQdot, probSize.dt);
+    finalizeSolution(V_opt, probSize, optimizationName);
 
     // ---------- FINALIZE  ------------ //
     double time_exec(double(end - start)/CLOCKS_PER_SEC);
-    std::cout<<"Execution time: "<<time_exec<<std::endl;
-    return  0;
+//    std::cout << "Execution time = " << time_exec<<std::endl;
+
+    while(animCallback.isActive()){}
     return 0;
 }
