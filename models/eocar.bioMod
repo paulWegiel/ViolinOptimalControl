@@ -9,22 +9,22 @@ external_forces	0
 // Seg1
     segment Seg1
         translations	xyz
-        rotations	xyz
+        rotations	x //yz
         ranges  -0.70 2.30
                 -1 1
                 -1 1
                 -pi pi
-                -pi/2 pi/2
-                -pi pi
-		mass 1
-		inertia 
-		  1 0 0 
-		  0 1 0
-		  0 0 1
-		com 0.5 0.5 0.5
-		mesh 0 0 0
-		mesh  0 1 0
-	endsegment
+                //-pi/2 pi/2
+                //-pi pi
+	mass 1
+	inertia 
+	  1 0 0 
+	  0 1 0
+	  0 0 1
+	com 0 0 0
+	mesh 0 0 0
+	mesh  0 1 0
+endsegment
 	
 // Marker on Seg1
     marker m0
